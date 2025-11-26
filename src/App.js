@@ -20,18 +20,19 @@ import {
   Package,
   Upload,
   Image as ImageIcon,
+  MessageSquare,
 } from "lucide-react";
 
-// --- Gemini API Configuration ---
-// 在实际运行时，环境会自动提供 key，这里留空即可
-const apiKey = "";
+// --- DeepSeek API 配置 ---
+// 1. 请前往 https://platform.deepseek.com/ 申请 API Key
+// 2. 将 Key 粘贴在下方引号中，例如 "sk-xxxxxxxx"
+const apiKey = "sk-bc129c352ab74a99ace67dcce1d6febb";
 
 export default function App() {
   const [items, setItems] = useState([]);
   const [showModal, setShowModal] = useState(false);
-  const [modalMode, setModalMode] = useState("manual"); // 'manual' or 'ai'
+  const [modalMode, setModalMode] = useState("manual");
 
-  // 表单状态：增加了 image 字段
   const [newItem, setNewItem] = useState({
     name: "",
     price: "",
@@ -42,20 +43,16 @@ export default function App() {
 
   // AI 状态
   const [smartInput, setSmartInput] = useState("");
-  const [selectedImage, setSelectedImage] = useState(null); // AI 模式下的临时图片
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiReport, setAiReport] = useState(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // 引用文件输入框
-  const fileInputRef = useRef(null); // 用于 AI 模式
-  const manualFileInputRef = useRef(null); // 用于手动模式
+  // 图片相关 (DeepSeek 暂不支持图片识别，保留手动上传功能)
+  const manualFileInputRef = useRef(null);
 
-  // 删除确认状态
   const [itemToDelete, setItemToDelete] = useState(null);
 
-  // 初始化加载数据
   useEffect(() => {
     const savedItems = localStorage.getItem("my_devices");
     if (savedItems) {
@@ -63,12 +60,10 @@ export default function App() {
     }
   }, []);
 
-  // 监听 items 变化并保存
   useEffect(() => {
     localStorage.setItem("my_devices", JSON.stringify(items));
   }, [items]);
 
-  // 核心逻辑：计算天数和日均成本
   const calculateStats = (price, dateStr) => {
     const purchaseDate = new Date(dateStr);
     const today = new Date();
@@ -79,46 +74,47 @@ export default function App() {
     return { days: validDays, dailyCost };
   };
 
-  // --- Gemini API Call Helper ---
-  const callGemini = async (prompt, imageBase64 = null) => {
-    try {
-      const parts = [{ text: prompt }];
-      if (imageBase64) {
-        const base64Data = imageBase64.split(",")[1];
-        const mimeType = imageBase64.split(";")[0].split(":")[1];
-        parts.push({
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Data,
-          },
-        });
-      }
+  // --- DeepSeek API 调用函数 ---
+  // DeepSeek 兼容 OpenAI 格式
+  const callDeepSeek = async (systemPrompt, userPrompt) => {
+    if (!apiKey) throw new Error("请先配置 DeepSeek API Key");
 
+    try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        "https://api.deepseek.com/chat/completions",
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
           body: JSON.stringify({
-            contents: [{ parts: parts }],
+            model: "deepseek-chat", // 使用 DeepSeek V3 模型
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            stream: false,
           }),
         }
       );
 
-      if (!response.ok) throw new Error("API request failed");
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error?.message || "API request failed");
+      }
       const data = await response.json();
-      return data.candidates[0].content.parts[0].text;
+      return data.choices[0].message.content;
     } catch (error) {
-      console.error("Gemini Error:", error);
+      console.error("DeepSeek Error:", error);
       throw error;
     }
   };
 
-  // 处理手动模式图片上传
+  // 处理手动图片选择
   const handleManualImageSelect = (e) => {
     const file = e.target.files[0];
     if (file) {
-      // 简单限制图片大小，防止 localStorage 爆满 (2MB)
       if (file.size > 2 * 1024 * 1024) {
         alert("图片太大了，建议上传 2MB 以内的图片");
         return;
@@ -131,45 +127,31 @@ export default function App() {
     }
   };
 
-  // 处理 AI 模式图片上传
-  const handleSmartImageSelect = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setSelectedImage(reader.result);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // --- Feature 1: AI 智能录入 ---
+  // --- Feature 1: AI 智能录入 (纯文本版) ---
   const handleSmartAdd = async () => {
-    if (!smartInput.trim() && !selectedImage) {
-      setErrorMsg("请输入文字描述或上传订单截图。");
+    if (!smartInput.trim()) {
+      setErrorMsg("请输入文字描述。");
       return;
     }
 
     setIsAnalyzing(true);
     setErrorMsg("");
 
-    const prompt = `
-      You are an assistant that extracts product details from text or order screenshots (images).
+    const systemPrompt = `
+      你是一个数据提取助手。请从用户的自然语言描述中提取设备信息，并返回纯 JSON 格式数据。
+      当前日期: ${new Date().toISOString().split("T")[0]}
       
-      User Input Text: "${smartInput}"
-      Current Date: "${new Date().toISOString().split("T")[0]}"
-      
-      Task:
-      Extract device information into a JSON object. 
-      If an image is provided, prioritize information visible in the image.
-      
-      Requirements:
-      1. Return ONLY the JSON object.
-      2. Fields: "name", "price" (number), "date" (YYYY-MM-DD), "type" (one of: 'phone', 'laptop', 'watch', 'console', 'camera', 'audio', 'home', 'other').
+      要求：
+      1. 只返回 JSON 对象，不要包含 markdown 格式（如 \`\`\`json）。
+      2. 字段包括：
+         - "name" (string, 设备名称)
+         - "price" (number, 价格数字)
+         - "date" (string, YYYY-MM-DD 格式。如果是"上个月"等相对时间，请根据当前日期计算)
+         - "type" (string, 从以下选择最匹配的一个: 'phone', 'laptop', 'watch', 'console', 'camera', 'audio', 'home', 'other')
     `;
 
     try {
-      const resultText = await callGemini(prompt, selectedImage);
+      const resultText = await callDeepSeek(systemPrompt, smartInput);
       const jsonStr = resultText.replace(/```json|```/g, "").trim();
       const result = JSON.parse(jsonStr);
 
@@ -178,20 +160,23 @@ export default function App() {
         price: result.price || "",
         date: result.date || new Date().toISOString().split("T")[0],
         type: result.type || "other",
-        image: selectedImage, // ✨ 关键修改：将识别用的图片直接继承给新设备
+        image: null,
       });
       setModalMode("manual");
       setSmartInput("");
-      setSelectedImage(null);
     } catch (e) {
       console.error(e);
-      setErrorMsg("AI 识别失败，请确保截图清晰或重试。");
+      setErrorMsg(
+        e.message === "请先配置 DeepSeek API Key"
+          ? "请在代码中填入 API Key"
+          : "AI 识别失败，请重试。"
+      );
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  // --- Feature 2: AI 资产分析 ---
+  // --- Feature 2: AI 资产分析 (DeepSeek 擅长这个) ---
   const generateReport = async () => {
     if (items.length === 0) return;
     setIsGeneratingReport(true);
@@ -200,19 +185,26 @@ export default function App() {
       stats: calculateStats(item.price, item.date),
     }));
 
-    const prompt = `
-      Act as a witty financial tech consultant. Analyze this user's device list and generate a short, fun report in CHINESE.
-      Data: ${JSON.stringify(enrichedItems)}
-      Output format (HTML):
-      <div class="space-y-2">
-        <p><strong>🏆 最值回票价奖:</strong> [Device Name] (Daily cost: [Cost]) - [One sentence why]</p>
-        <p><strong>💸 最大的坑:</strong> [Device Name] (Daily cost: [Cost]) - [One sentence why]</p>
-        <p><strong>📊 消费画像:</strong> [2-3 sentences analyzing their spending habits. Be humorous!]</p>
+    const systemPrompt = "你是一位幽默、犀利的数码理财顾问。";
+    const userPrompt = `
+      请分析这份设备列表，生成一份中文 HTML 简报。
+      数据: ${JSON.stringify(enrichedItems)}
+      
+      输出格式要求 (HTML):
+      <div class="space-y-3">
+        <p><strong>🏆 年度理财神机:</strong> [设备名] (日均 [金额] 元) - [一句话犀利点评为什么值]</p>
+        <p><strong>💸 败家之眼奖:</strong> [设备名] (日均 [金额] 元) - [一句话点评为什么亏]</p>
+        <div class="bg-indigo-50 p-3 rounded-lg text-sm text-indigo-800">
+          <strong>📊 深度画像:</strong><br/>
+          [2-3句话分析用户的消费习惯和科技品味，风格要幽默有趣，用词稍微"DeepSeek"一点]
+        </div>
       </div>
+      
+      注意：直接返回 HTML 代码，不要包裹在 markdown 中。
     `;
 
     try {
-      const text = await callGemini(prompt);
+      const text = await callDeepSeek(systemPrompt, userPrompt);
       const cleanHtml = text.replace(/```html|```/g, "").trim();
       setAiReport(cleanHtml);
     } catch (e) {
@@ -222,17 +214,10 @@ export default function App() {
     }
   };
 
-  // 添加新设备
   const handleAddItem = (e) => {
     e.preventDefault();
     if (!newItem.name || !newItem.price || !newItem.date) return;
-
-    const itemToAdd = {
-      id: Date.now(),
-      ...newItem,
-    };
-
-    setItems([itemToAdd, ...items]);
+    setItems([{ id: Date.now(), ...newItem }, ...items]);
     setNewItem({ name: "", price: "", date: "", type: "phone", image: null });
     setShowModal(false);
     setModalMode("manual");
@@ -290,14 +275,14 @@ export default function App() {
             ) : (
               <Sparkles size={14} />
             )}
-            {isGeneratingReport ? "分析中..." : "AI 分析"}
+            {isGeneratingReport ? "深度分析" : "DeepSeek 分析"}
           </button>
         )}
       </div>
 
       <div className="p-4 max-w-md mx-auto">
         {/* --- 概览卡片 --- */}
-        <div className="bg-indigo-600 rounded-2xl p-6 text-white shadow-lg mb-6 transition-all duration-500">
+        <div className="bg-indigo-600 rounded-2xl p-6 text-white shadow-lg mb-6">
           <div className="text-indigo-100 text-sm mb-1">设备总投入</div>
           <div className="text-3xl font-bold mb-4">
             ¥ {totalSpent.toLocaleString()}
@@ -310,18 +295,18 @@ export default function App() {
 
         {/* --- AI 报告 --- */}
         {aiReport && (
-          <div className="mb-6 bg-gradient-to-br from-purple-50 to-indigo-50 p-5 rounded-2xl border border-indigo-100 shadow-sm animate-in fade-in slide-in-from-top-4">
-            <div className="flex items-center gap-2 mb-3 text-indigo-700 font-bold">
+          <div className="mb-6 bg-white p-5 rounded-2xl border border-indigo-100 shadow-sm animate-in fade-in slide-in-from-top-4">
+            <div className="flex items-center gap-2 mb-4 text-indigo-700 font-bold border-b border-indigo-50 pb-2">
               <Wand2 size={18} />
-              <span>AI 资产分析日报</span>
+              <span>DeepSeek 深度报告</span>
             </div>
             <div
-              className="text-sm text-slate-700 leading-relaxed report-content"
+              className="text-sm text-slate-700 leading-relaxed space-y-2"
               dangerouslySetInnerHTML={{ __html: aiReport }}
             />
             <button
               onClick={() => setAiReport(null)}
-              className="mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
+              className="mt-4 text-xs text-slate-400 hover:text-slate-600 underline block w-full text-center"
             >
               收起报告
             </button>
@@ -332,7 +317,6 @@ export default function App() {
         <h2 className="text-slate-500 text-sm font-semibold mb-3 px-1">
           设备清单
         </h2>
-
         {items.length === 0 ? (
           <div className="text-center py-10 text-slate-400">
             <Calculator size={48} className="mx-auto mb-2 opacity-50" />
@@ -349,7 +333,6 @@ export default function App() {
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex items-center gap-3">
-                      {/* 图标或图片容器 */}
                       <div className="w-12 h-12 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden shrink-0 border border-slate-100">
                         {item.image ? (
                           <img
@@ -380,7 +363,6 @@ export default function App() {
                       <Trash2 size={18} />
                     </button>
                   </div>
-
                   <div className="grid grid-cols-2 gap-4 mt-3 bg-slate-50 p-3 rounded-lg">
                     <div className="text-center border-r border-slate-200">
                       <div className="text-xs text-slate-500 mb-1">
@@ -412,13 +394,11 @@ export default function App() {
         )}
       </div>
 
-      {/* --- FAB --- */}
       <button
         onClick={() => {
           setShowModal(true);
           setModalMode("manual");
           setErrorMsg("");
-          setSelectedImage(null);
           setSmartInput("");
         }}
         className="fixed bottom-6 right-6 bg-indigo-600 text-white p-4 rounded-full shadow-xl hover:bg-indigo-700 transition-transform active:scale-90 z-20"
@@ -440,7 +420,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Tab Switcher */}
             <div className="flex border-b border-slate-100 shrink-0">
               <button
                 onClick={() => setModalMode("manual")}
@@ -467,64 +446,22 @@ export default function App() {
             <div className="overflow-y-auto p-6">
               {modalMode === "ai" ? (
                 <div className="space-y-4">
-                  {/* ... AI 模式 UI 保持不变 ... */}
-                  <div className="bg-purple-50 p-4 rounded-xl text-xs text-purple-700 mb-2">
-                    <p className="font-bold mb-1">💡 全能识别模式：</p>
+                  <div className="bg-blue-50 p-4 rounded-xl text-xs text-blue-700 mb-2 border border-blue-100">
+                    <p className="font-bold mb-1 flex items-center gap-1">
+                      <MessageSquare size={12} /> DeepSeek 模式：
+                    </p>
                     <p className="opacity-80">
-                      上传电商订单截图，或直接输入文字描述，AI
-                      将自动提取信息。截图将自动作为设备图片保存。
+                      请输入一段话，AI 会自动提取设备名、价格和日期。
+                    </p>
+                    <p className="opacity-60 mt-1 text-[10px]">
+                      *
+                      暂不支持图片识别，请直接描述，如“昨天京东3000买了个耳机”。
                     </p>
                   </div>
 
-                  <div
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-                      selectedImage
-                        ? "border-purple-300 bg-purple-50"
-                        : "border-slate-300 hover:border-purple-400 hover:bg-slate-50"
-                    }`}
-                  >
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      accept="image/*"
-                      className="hidden"
-                      onChange={handleSmartImageSelect}
-                    />
-
-                    {selectedImage ? (
-                      <div className="relative w-full">
-                        <img
-                          src={selectedImage}
-                          alt="Selected"
-                          className="max-h-40 rounded-lg mx-auto object-contain shadow-sm"
-                        />
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedImage(null);
-                          }}
-                          className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-md hover:bg-red-600"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="text-center py-4 text-slate-400">
-                        <ImageIcon
-                          size={32}
-                          className="mx-auto mb-2 opacity-50"
-                        />
-                        <span className="text-sm font-medium">
-                          点击上传订单截图
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
                   <textarea
-                    placeholder="备注 (可选)，例如：这是双十一买的..."
-                    className="w-full p-4 bg-slate-50 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 min-h-[80px] resize-none text-slate-700 text-sm"
+                    placeholder="例如：2023年双十一买的索尼降噪耳机，花了1299元..."
+                    className="w-full p-4 bg-slate-50 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 min-h-[120px] resize-none text-slate-700 text-sm"
                     value={smartInput}
                     onChange={(e) => setSmartInput(e.target.value)}
                   />
@@ -535,15 +472,13 @@ export default function App() {
 
                   <button
                     onClick={handleSmartAdd}
-                    disabled={
-                      isAnalyzing || (!smartInput.trim() && !selectedImage)
-                    }
+                    disabled={isAnalyzing || !smartInput.trim()}
                     className="w-full bg-purple-600 text-white py-3 rounded-xl font-bold hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
                   >
                     {isAnalyzing ? (
                       <>
                         <Loader2 size={18} className="animate-spin" />
-                        AI 识别中...
+                        DeepSeek 思考中...
                       </>
                     ) : (
                       <>
@@ -555,7 +490,6 @@ export default function App() {
                 </div>
               ) : (
                 <form onSubmit={handleAddItem} className="space-y-4">
-                  {/* 手动模式下的图片上传区 */}
                   <div>
                     <label className="block text-sm text-slate-500 mb-1">
                       设备图片 (可选)
@@ -575,7 +509,6 @@ export default function App() {
                         className="hidden"
                         onChange={handleManualImageSelect}
                       />
-
                       {newItem.image ? (
                         <div className="relative w-full">
                           <img
@@ -685,7 +618,6 @@ export default function App() {
                       />
                     </div>
                   </div>
-
                   <button
                     type="submit"
                     className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 active:bg-indigo-800 transition-colors mt-2"
@@ -699,7 +631,6 @@ export default function App() {
         </div>
       )}
 
-      {/* --- 删除确认弹窗 --- */}
       {itemToDelete && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-xs shadow-2xl p-6 animate-in fade-in zoom-in duration-200">
@@ -712,7 +643,6 @@ export default function App() {
                 该设备的记录将被永久移除，无法恢复。
               </p>
             </div>
-
             <div className="flex gap-3">
               <button
                 onClick={() => setItemToDelete(null)}
